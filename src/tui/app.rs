@@ -6446,20 +6446,27 @@ fn collect_diff_colored(worktree_path: &str, base_branch: &str, width: u16) -> V
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty() && !matches!(s.as_str(), "less" | "more" | "most" | "cat"));
 
-    let shell_cmd = match pager {
-        Some(p) => format!("{} | {} --width={}", git_cmd, p, width),
-        None => git_cmd,
+    let run_cmd = |cmd: &str| -> Option<Vec<u8>> {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(worktree_path)
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor")
+            .output()
+            .ok()
+            .map(|o| o.stdout)
+            .filter(|out| !out.is_empty())
     };
 
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&shell_cmd)
-        .current_dir(worktree_path)
-        .env("TERM", "xterm-256color")
-        .env("COLORTERM", "truecolor")
-        .output()
-        .map(|o| o.stdout)
-        .unwrap_or_else(|_| b"(failed to run git diff)".to_vec());
+    // Try with pager first, fall back to plain colored diff
+    let output = if let Some(p) = pager {
+        let with_pager = format!("{} | {} --width={}", git_cmd, p, width);
+        run_cmd(&with_pager).or_else(|| run_cmd(&git_cmd))
+    } else {
+        run_cmd(&git_cmd)
+    }
+    .unwrap_or_else(|| b"(failed to run git diff)".to_vec());
 
     strip_osc_sequences(&output)
 }

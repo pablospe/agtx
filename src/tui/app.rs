@@ -3993,7 +3993,7 @@ impl App {
                 } else {
                     base_branch.clone()
                 };
-                collect_diff_with_pager(worktree_path, &base, SHELL_POPUP_CONTENT_WIDTH)
+                collect_diff_colored(worktree_path, &base)
             } else {
                 b"(task has no worktree yet)".to_vec()
             };
@@ -6430,79 +6430,20 @@ fn delete_task_resources(
     Ok(())
 }
 
-/// Run `git diff {base}...HEAD` in the worktree, piped through the user's
-/// configured git pager (e.g. delta) for syntax-highlighted ANSI output.
-///
-/// Git only invokes its pager when stdout is a tty, so we detect the pager
-/// and pipe through it explicitly. Interactive pagers (less, more) are skipped
-/// since they'd hang without a tty.
-fn collect_diff_with_pager(worktree_path: &str, base_branch: &str, width: u16) -> Vec<u8> {
-    // Detect the pager using git's own resolution (respects GIT_PAGER, core.pager, PAGER)
-    let pager = std::process::Command::new("git")
+/// Run `git --no-pager -c color.diff=always diff {base}...HEAD` in the worktree.
+fn collect_diff_colored(worktree_path: &str, base_branch: &str) -> Vec<u8> {
+    std::process::Command::new("git")
         .current_dir(worktree_path)
-        .args(["var", "GIT_PAGER"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let git_cmd = format!(
-        "git -c color.diff=always diff '{}'...HEAD",
-        base_branch.replace('\'', "'\\''")
-    );
-
-    let shell_cmd = match pager.as_deref() {
-        // Interactive pagers would hang without a tty — just use colored git output
-        Some(p) if p.starts_with("less") || p.starts_with("more") || p.starts_with("most") => {
-            git_cmd
-        }
-        Some(pager) => format!("{} | {} --width={}", git_cmd, pager, width),
-        None => git_cmd,
-    };
-
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&shell_cmd)
-        .current_dir(worktree_path)
-        .env("TERM", "xterm-256color")
-        .env("COLORTERM", "truecolor")
+        .args([
+            "--no-pager",
+            "-c",
+            "color.diff=always",
+            "diff",
+            &format!("{}...HEAD", base_branch),
+        ])
         .output()
         .map(|o| o.stdout)
-        .unwrap_or_else(|_| b"(failed to run git diff)".to_vec());
-
-    // Strip OSC sequences (e.g. hyperlinks) that our ANSI parser can't handle
-    strip_osc_sequences(&output)
-}
-
-/// Strip OSC (Operating System Command) escape sequences from bytes.
-/// These are `ESC ] ... (BEL | ST)` sequences like OSC 8 hyperlinks
-/// that delta and other tools emit but our ANSI parser doesn't handle.
-fn strip_osc_sequences(input: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        // ESC ] starts an OSC sequence
-        if i + 1 < input.len() && input[i] == 0x1b && input[i + 1] == b']' {
-            // Skip until BEL (0x07) or ST (ESC \)
-            i += 2;
-            while i < input.len() {
-                if input[i] == 0x07 {
-                    i += 1;
-                    break;
-                }
-                if i + 1 < input.len() && input[i] == 0x1b && input[i + 1] == b'\\' {
-                    i += 2;
-                    break;
-                }
-                i += 1;
-            }
-        } else {
-            result.push(input[i]);
-            i += 1;
-        }
-    }
-    result
+        .unwrap_or_else(|_| b"(failed to run git diff)".to_vec())
 }
 
 /// Helper function to create a centered rect

@@ -247,8 +247,8 @@ struct AppState {
     pr_confirm_popup: Option<PrConfirmPopup>,
     // Moving Review back to Running
     review_to_running_task_id: Option<String>,
-    // Git diff popup
-    diff_popup: Option<DiffPopup>,
+    // Git diff popup (ShellPopup with ANSI-colored diff output)
+    diff_popup: Option<ShellPopup>,
     // Channel for receiving PR description generation results
     pr_generation_rx: Option<mpsc::Receiver<(String, String)>>,
     // PR creation status popup
@@ -378,14 +378,6 @@ enum PrCreationStatus {
     Pushing, // Pushing to existing PR
     Success,
     Error,
-}
-
-/// State for git diff popup
-#[derive(Debug, Clone)]
-struct DiffPopup {
-    task_title: String,
-    diff_content: String,
-    scroll_offset: usize,
 }
 
 /// State for task search popup
@@ -1966,70 +1958,9 @@ impl App {
             frame.render_widget(content, inner);
         }
 
-        // Git diff popup
+        // Git diff popup (reuses ShellPopup rendering with ANSI-colored diff output)
         if let Some(ref popup) = state.diff_popup {
-            let popup_area = centered_rect(80, 80, area);
-            frame.render_widget(Clear, popup_area);
-
-            let popup_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1), // Title bar
-                    Constraint::Min(0),    // Diff content
-                    Constraint::Length(1), // Footer
-                ])
-                .split(popup_area);
-
-            // Title bar
-            let title = format!(" Diff: {} ", popup.task_title);
-            let title_bar = Paragraph::new(title).style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(hex_to_color(&state.config.theme.color_popup_header)),
-            );
-            frame.render_widget(title_bar, popup_chunks[0]);
-
-            // Diff content with syntax highlighting
-            let lines: Vec<Line> = popup
-                .diff_content
-                .lines()
-                .skip(popup.scroll_offset)
-                .take(popup_chunks[1].height.saturating_sub(2) as usize)
-                .map(|line| {
-                    let style = if line.starts_with('+') && !line.starts_with("+++") {
-                        Style::default().fg(Color::Green)
-                    } else if line.starts_with('-') && !line.starts_with("---") {
-                        Style::default().fg(Color::Red)
-                    } else if line.starts_with("@@") {
-                        Style::default().fg(Color::Cyan)
-                    } else if line.starts_with("diff ") || line.starts_with("index ") {
-                        Style::default().fg(hex_to_color(&state.config.theme.color_selected))
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-                    Line::from(Span::styled(line, style))
-                })
-                .collect();
-
-            let diff_content =
-                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(
-                    Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)),
-                ));
-            frame.render_widget(diff_content, popup_chunks[1]);
-
-            // Footer with scroll info
-            let total_lines = popup.diff_content.lines().count();
-            let footer_text = format!(
-                " [j/k] scroll  [d/u] page  [g/G] top/bottom  [q/Esc] close  ({}/{}) ",
-                popup.scroll_offset + 1,
-                total_lines
-            );
-            let footer = Paragraph::new(footer_text).style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(hex_to_color(&state.config.theme.color_dimmed)),
-            );
-            frame.render_widget(footer, popup_chunks[2]);
+            Self::draw_shell_popup(popup, frame, area, &state.config.theme);
         }
     }
 
@@ -3056,24 +2987,25 @@ impl App {
                     self.state.diff_popup = None;
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
-                    popup.scroll_offset = popup.scroll_offset.saturating_add(1);
+                    popup.scroll_down(1);
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    popup.scroll_offset = popup.scroll_offset.saturating_sub(1);
+                    popup.scroll_up(1);
                 }
                 KeyCode::Char('d') | KeyCode::PageDown => {
-                    popup.scroll_offset = popup.scroll_offset.saturating_add(20);
+                    popup.scroll_down(20);
                 }
                 KeyCode::Char('u') | KeyCode::PageUp => {
-                    popup.scroll_offset = popup.scroll_offset.saturating_sub(20);
+                    popup.scroll_up(20);
                 }
                 KeyCode::Char('g') => {
-                    popup.scroll_offset = 0;
+                    // Go to top of diff
+                    let content_str = String::from_utf8_lossy(&popup.cached_content);
+                    let total = content_str.lines().count() as i32;
+                    popup.scroll_up(total);
                 }
                 KeyCode::Char('G') => {
-                    // Go to end
-                    let line_count = popup.diff_content.lines().count();
-                    popup.scroll_offset = line_count.saturating_sub(10);
+                    popup.scroll_to_bottom();
                 }
                 _ => {}
             }
@@ -4052,27 +3984,28 @@ impl App {
 
     fn show_task_diff(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
-            let diff_content = if let Some(worktree_path) = &task.worktree_path {
-                let mut exclude_prefixes: Vec<&str> = crate::git::AGENT_CONFIG_DIRS.to_vec();
-                let plugin = self.load_task_plugin(task);
-                let plugin_dirs: Vec<String> =
-                    plugin.map_or_else(Vec::new, |p| p.copy_dirs.clone());
-                let plugin_dir_refs: Vec<&str> = plugin_dirs.iter().map(|s| s.as_str()).collect();
-                exclude_prefixes.extend(plugin_dir_refs);
-                collect_task_diff(
-                    worktree_path,
-                    self.state.git_ops.as_ref(),
-                    &exclude_prefixes,
-                )
+            let task_title = task.title.clone();
+            let cached_content = if let Some(worktree_path) = &task.worktree_path {
+                let base_branch = &self.state.config.base_branch;
+                let base = if base_branch.is_empty() {
+                    crate::git::detect_main_branch(Path::new(worktree_path))
+                        .unwrap_or_else(|_| "main".to_string())
+                } else {
+                    base_branch.clone()
+                };
+                collect_diff_with_pager(worktree_path, &base, SHELL_POPUP_CONTENT_WIDTH)
             } else {
-                "(task has no worktree yet)".to_string()
+                b"(task has no worktree yet)".to_vec()
             };
 
-            self.state.diff_popup = Some(DiffPopup {
-                task_title: task.title.clone(),
-                diff_content,
-                scroll_offset: 0,
-            });
+            let mut popup = ShellPopup::new(task_title, String::new());
+            popup.cached_content = cached_content;
+            // Start at the top of the diff (ShellPopup defaults to bottom)
+            let total_lines = String::from_utf8_lossy(&popup.cached_content)
+                .lines()
+                .count() as i32;
+            popup.scroll_offset = -total_lines;
+            self.state.diff_popup = Some(popup);
         }
         Ok(())
     }
@@ -6497,61 +6430,79 @@ fn delete_task_resources(
     Ok(())
 }
 
-/// Collect git diff content from a worktree
-/// Returns formatted diff sections (unstaged, staged, untracked)
-fn collect_task_diff(
-    worktree_path: &str,
-    git_ops: &dyn GitOperations,
-    exclude_prefixes: &[&str],
-) -> String {
-    let worktree = Path::new(worktree_path);
-    let mut sections = Vec::new();
+/// Run `git diff {base}...HEAD` in the worktree, piped through the user's
+/// configured git pager (e.g. delta) for syntax-highlighted ANSI output.
+///
+/// Git only invokes its pager when stdout is a tty, so we detect the pager
+/// and pipe through it explicitly. Interactive pagers (less, more) are skipped
+/// since they'd hang without a tty.
+fn collect_diff_with_pager(worktree_path: &str, base_branch: &str, width: u16) -> Vec<u8> {
+    // Detect the pager using git's own resolution (respects GIT_PAGER, core.pager, PAGER)
+    let pager = std::process::Command::new("git")
+        .current_dir(worktree_path)
+        .args(["var", "GIT_PAGER"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
 
-    // Unstaged changes (modified tracked files)
-    let unstaged = git_ops.diff(worktree);
-    if !unstaged.trim().is_empty() {
-        sections.push(format!("=== Unstaged Changes ===\n\n{}", unstaged));
-    }
+    let git_cmd = format!(
+        "git -c color.diff=always diff '{}'...HEAD",
+        base_branch.replace('\'', "'\\''")
+    );
 
-    // Staged changes
-    let staged = git_ops.diff_cached(worktree);
-    if !staged.trim().is_empty() {
-        sections.push(format!("=== Staged Changes ===\n\n{}", staged));
-    }
-
-    // Untracked files - show as diff (new file content)
-    let untracked = git_ops.list_untracked_files(worktree);
-    if !untracked.trim().is_empty() {
-        let mut untracked_section = String::from("=== Untracked Files ===\n");
-        for file in untracked.lines() {
-            let file = file.trim();
-            if file.is_empty() {
-                continue;
-            }
-            // Skip files in copied directories (agent configs, plugin dirs)
-            if exclude_prefixes
-                .iter()
-                .any(|prefix| file.starts_with(&format!("{}/", prefix.trim_end_matches('/'))))
-            {
-                continue;
-            }
-            // Show diff for untracked file (as if adding new file)
-            let file_diff = git_ops.diff_untracked_file(worktree, file);
-            if !file_diff.trim().is_empty() {
-                untracked_section.push_str(&format!("\n{}", file_diff));
-            } else {
-                // Fallback: just show file name
-                untracked_section.push_str(&format!("\n+++ new file: {}\n", file));
-            }
+    let shell_cmd = match pager.as_deref() {
+        // Interactive pagers would hang without a tty — just use colored git output
+        Some(p) if p.starts_with("less") || p.starts_with("more") || p.starts_with("most") => {
+            git_cmd
         }
-        sections.push(untracked_section);
-    }
+        Some(pager) => format!("{} | {} --width={}", git_cmd, pager, width),
+        None => git_cmd,
+    };
 
-    if sections.is_empty() {
-        format!("(no changes)\n\nWorktree: {}", worktree_path)
-    } else {
-        sections.join("\n\n")
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&shell_cmd)
+        .current_dir(worktree_path)
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .output()
+        .map(|o| o.stdout)
+        .unwrap_or_else(|_| b"(failed to run git diff)".to_vec());
+
+    // Strip OSC sequences (e.g. hyperlinks) that our ANSI parser can't handle
+    strip_osc_sequences(&output)
+}
+
+/// Strip OSC (Operating System Command) escape sequences from bytes.
+/// These are `ESC ] ... (BEL | ST)` sequences like OSC 8 hyperlinks
+/// that delta and other tools emit but our ANSI parser doesn't handle.
+fn strip_osc_sequences(input: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        // ESC ] starts an OSC sequence
+        if i + 1 < input.len() && input[i] == 0x1b && input[i + 1] == b']' {
+            // Skip until BEL (0x07) or ST (ESC \)
+            i += 2;
+            while i < input.len() {
+                if input[i] == 0x07 {
+                    i += 1;
+                    break;
+                }
+                if i + 1 < input.len() && input[i] == 0x1b && input[i + 1] == b'\\' {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+        } else {
+            result.push(input[i]);
+            i += 1;
+        }
     }
+    result
 }
 
 /// Helper function to create a centered rect

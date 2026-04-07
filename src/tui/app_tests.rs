@@ -1037,79 +1037,6 @@ fn test_delete_task_resources_no_resources() {
 }
 
 // =============================================================================
-// Tests for collect_task_diff
-// =============================================================================
-
-/// Test collect_task_diff with all types of changes
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_collect_task_diff_all_changes() {
-    let mut mock_git = MockGitOperations::new();
-
-    mock_git
-        .expect_diff()
-        .returning(|_| "diff --git a/file.rs\n-old\n+new".to_string());
-
-    mock_git
-        .expect_diff_cached()
-        .returning(|_| "diff --git a/staged.rs\n+added".to_string());
-
-    mock_git
-        .expect_list_untracked_files()
-        .returning(|_| "new_file.rs\n".to_string());
-
-    mock_git
-        .expect_diff_untracked_file()
-        .returning(|_, _| "+++ new_file.rs\n+content".to_string());
-
-    let result = collect_task_diff("/tmp/worktree", &mock_git, &[]);
-
-    assert!(result.contains("Unstaged Changes"));
-    assert!(result.contains("Staged Changes"));
-    assert!(result.contains("Untracked Files"));
-}
-
-/// Test collect_task_diff with no changes
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_collect_task_diff_no_changes() {
-    let mut mock_git = MockGitOperations::new();
-
-    mock_git.expect_diff().returning(|_| String::new());
-    mock_git.expect_diff_cached().returning(|_| String::new());
-    mock_git
-        .expect_list_untracked_files()
-        .returning(|_| String::new());
-
-    let result = collect_task_diff("/tmp/worktree", &mock_git, &[]);
-
-    assert!(result.contains("(no changes)"));
-    assert!(result.contains("/tmp/worktree"));
-}
-
-/// Test collect_task_diff with only unstaged changes
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_collect_task_diff_only_unstaged() {
-    let mut mock_git = MockGitOperations::new();
-
-    mock_git
-        .expect_diff()
-        .returning(|_| "diff --git a/modified.rs".to_string());
-
-    mock_git.expect_diff_cached().returning(|_| String::new());
-    mock_git
-        .expect_list_untracked_files()
-        .returning(|_| String::new());
-
-    let result = collect_task_diff("/tmp/worktree", &mock_git, &[]);
-
-    assert!(result.contains("Unstaged Changes"));
-    assert!(!result.contains("Staged Changes"));
-    assert!(!result.contains("Untracked Files"));
-}
-
-// =============================================================================
 // Tests for build_highlighted_text
 // =============================================================================
 
@@ -7261,7 +7188,7 @@ fn test_transform_skill_for_opencode_uses_description_from_frontmatter() {
 
 // =============================================================================
 // Tests for mock-dependent functions: is_pane_at_shell, is_agent_active,
-// collect_task_diff, cleanup_task_for_done, cleanup_task_resources,
+// cleanup_task_for_done, cleanup_task_resources,
 // delete_task_resources, save_task
 // =============================================================================
 
@@ -7324,68 +7251,6 @@ fn test_is_agent_active_false_when_at_shell_no_indicator() {
     assert!(!is_agent_active(&mock_tmux, "proj:task"));
 }
 
-// --- collect_task_diff ---
-
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_collect_task_diff_shows_unstaged_changes() {
-    let mut mock_git = MockGitOperations::new();
-    mock_git
-        .expect_diff()
-        .returning(|_| "diff --git a/foo.rs\n-old\n+new\n".to_string());
-    mock_git.expect_diff_cached().returning(|_| String::new());
-    mock_git
-        .expect_list_untracked_files()
-        .returning(|_| String::new());
-
-    let result = collect_task_diff("/tmp/wt", &mock_git, &[]);
-    assert!(result.contains("Unstaged Changes"), "result={}", result);
-    assert!(result.contains("foo.rs"), "result={}", result);
-}
-
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_collect_task_diff_shows_staged_changes() {
-    let mut mock_git = MockGitOperations::new();
-    mock_git.expect_diff().returning(|_| String::new());
-    mock_git
-        .expect_diff_cached()
-        .returning(|_| "diff --git a/bar.rs\n+added\n".to_string());
-    mock_git
-        .expect_list_untracked_files()
-        .returning(|_| String::new());
-
-    let result = collect_task_diff("/tmp/wt", &mock_git, &[]);
-    assert!(result.contains("Staged Changes"), "result={}", result);
-}
-
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_collect_task_diff_untracked_excluded_by_prefix() {
-    let mut mock_git = MockGitOperations::new();
-    mock_git.expect_diff().returning(|_| String::new());
-    mock_git.expect_diff_cached().returning(|_| String::new());
-    mock_git
-        .expect_list_untracked_files()
-        .returning(|_| ".claude/settings.json\nsrc/new_file.rs\n".to_string());
-    // diff_untracked_file only called for non-excluded files
-    mock_git
-        .expect_diff_untracked_file()
-        .withf(|_, file: &str| file == "src/new_file.rs")
-        .returning(|_, _| "+new content\n".to_string());
-
-    let result = collect_task_diff("/tmp/wt", &mock_git, &[".claude"]);
-    assert!(
-        !result.contains("settings.json"),
-        "excluded file appeared: {}",
-        result
-    );
-    assert!(
-        result.contains("new_file.rs") || result.contains("Untracked"),
-        "result={}",
-        result
-    );
-}
 
 // --- cleanup_task_for_done ---
 

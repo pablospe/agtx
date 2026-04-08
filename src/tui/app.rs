@@ -311,6 +311,8 @@ struct AppState {
     orchestrator_last_check: Instant,
     // Background session refresh channel (non-blocking phase status polling)
     session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
+    // Original tmux window index before we moved to 0 (for restore on exit)
+    original_tmux_window: Option<String>,
 }
 
 /// State for confirming move to Done
@@ -651,8 +653,14 @@ impl App {
                 orchestrator_stable_since: None,
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
+                original_tmux_window: None,
             },
         };
+
+        // In "current" mode, claim window 0 for the agtx TUI
+        if app.state.config.tmux_mode == TmuxMode::Current {
+            app.state.original_tmux_window = claim_tmux_window_zero();
+        }
 
         // Load and cache workflow plugin
         app.state.cached_plugin = Some(load_plugin_if_configured(
@@ -862,6 +870,7 @@ impl App {
                 orchestrator_stable_since: None,
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
+                original_tmux_window: None,
             },
         })
     }
@@ -6229,6 +6238,11 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // Restore tmux window position if we claimed window 0
+        if let Some(ref original_index) = self.state.original_tmux_window {
+            restore_tmux_window(original_index);
+        }
+
         match self.terminal.backend_mut() {
             AppBackend::Crossterm(backend) => {
                 let _ = disable_raw_mode();
@@ -6308,6 +6322,53 @@ fn detect_current_tmux_session() -> Option<String> {
         }
     }
     None
+}
+
+/// Move the current tmux window to index 0 and rename it "agtx".
+/// Returns the original window index (for restore on exit).
+fn claim_tmux_window_zero() -> Option<String> {
+    // Get current window index
+    let output = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#{window_index}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let original_index = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if original_index.is_empty() {
+        return None;
+    }
+
+    // Try to move to index 0 (fails silently if 0 is already taken)
+    let move_result = std::process::Command::new("tmux")
+        .args(["move-window", "-t", "0"])
+        .output();
+    if move_result.map(|o| o.status.success()).unwrap_or(false) {
+        // Rename the window to "agtx"
+        let _ = std::process::Command::new("tmux")
+            .args(["rename-window", "agtx"])
+            .output();
+        Some(original_index)
+    } else {
+        // Window 0 already exists — just rename in place
+        let _ = std::process::Command::new("tmux")
+            .args(["rename-window", "agtx"])
+            .output();
+        None
+    }
+}
+
+/// Restore the tmux window to its original index and clear the name.
+fn restore_tmux_window(original_index: &str) {
+    // Move back to original index (best-effort)
+    let _ = std::process::Command::new("tmux")
+        .args(["move-window", "-t", original_index])
+        .output();
+    // Let tmux auto-name the window again
+    let _ = std::process::Command::new("tmux")
+        .args(["set-window-option", "automatic-rename", "on"])
+        .output();
 }
 
 fn ensure_project_tmux_session(

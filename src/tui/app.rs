@@ -6331,45 +6331,89 @@ fn detect_current_tmux_session() -> Option<String> {
 }
 
 /// Move the current tmux window to index 0 and rename it "agtx".
-/// Returns the original window index (for restore on exit).
+///
+/// Strategy:
+/// - base-index > 0: index 0 is a free slot — temporarily lower base-index,
+///   move agtx to 0, restore base-index. Other windows stay put.
+/// - base-index == 0: index 0 is occupied — bump base-index to 1, renumber
+///   all windows (shifts them to 1+), then set base-index back to 0 and move
+///   agtx into the now-free index 0. Result: 0:agtx 1:old-0 2:old-1 ...
+///
+/// Returns the original window index (for restore on exit), and whether
+/// windows were renumbered (so restore can undo it).
 fn claim_tmux_window_zero() -> Option<String> {
-    // Get current window index
     let output = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "#{window_index}"])
+        .args(["display-message", "-p", "#{window_index} #{base-index}"])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let original_index = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if original_index.is_empty() {
+    let info = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let parts: Vec<&str> = info.split_whitespace().collect();
+    let original_index = parts.first()?.to_string();
+    let base_index: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    if original_index == "0" {
+        let _ = std::process::Command::new("tmux")
+            .args(["rename-window", "agtx"])
+            .output();
         return None;
     }
 
-    // Try to move to index 0 (fails silently if 0 is already taken)
-    let move_result = std::process::Command::new("tmux")
-        .args(["move-window", "-t", "0"])
-        .output();
-    if move_result.map(|o| o.status.success()).unwrap_or(false) {
-        // Rename the window to "agtx"
+    let ok = if base_index > 0 {
+        // Index 0 is free — temporarily allow it, move agtx there
+        let _ = std::process::Command::new("tmux")
+            .args(["set", "-g", "base-index", "0"])
+            .output();
+        let ok = std::process::Command::new("tmux")
+            .args(["move-window", "-t", "0"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let _ = std::process::Command::new("tmux")
+            .args(["set", "-g", "base-index", &base_index.to_string()])
+            .output();
+        ok
+    } else {
+        // base-index 0: all indices occupied starting from 0.
+        // Renumber everything to start at 1, freeing index 0 for agtx.
+        let _ = std::process::Command::new("tmux")
+            .args(["set", "-g", "base-index", "1"])
+            .output();
+        let _ = std::process::Command::new("tmux")
+            .args(["move-window", "-r"])
+            .output();
+        // Now all windows are 1..N. Set base-index back to 0 and move agtx to 0.
+        let _ = std::process::Command::new("tmux")
+            .args(["set", "-g", "base-index", "0"])
+            .output();
+        std::process::Command::new("tmux")
+            .args(["move-window", "-t", "0"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+
+    if ok {
         let _ = std::process::Command::new("tmux")
             .args(["rename-window", "agtx"])
             .output();
         Some(original_index)
     } else {
-        // Window 0 already exists — just rename in place
-        let _ = std::process::Command::new("tmux")
-            .args(["rename-window", "agtx"])
-            .output();
         None
     }
 }
 
-/// Restore the tmux window to its original index and clear the name.
+/// Restore the tmux window from index 0 back to its original position.
+/// Moves agtx out of 0, then renumbers so windows are sequential again.
 fn restore_tmux_window(original_index: &str) {
-    // Move back to original index (best-effort)
     let _ = std::process::Command::new("tmux")
         .args(["move-window", "-t", original_index])
+        .output();
+    // Renumber to close any gaps left behind
+    let _ = std::process::Command::new("tmux")
+        .args(["move-window", "-r"])
         .output();
     // Let tmux auto-name the window again
     let _ = std::process::Command::new("tmux")

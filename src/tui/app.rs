@@ -5634,11 +5634,10 @@ impl App {
             if !is_current_mode {
                 cmd.args(["-L", tmux::AGENT_SERVER]);
             }
-            cmd.args(["select-window", "-t", target]);
-            if !is_current_mode {
-                // Only resize in server mode — windows may have been created with no client
-                cmd.args([";", "resize-window", "-A"]);
-            }
+            cmd.args([
+                "select-window", "-t", target,
+                ";", "resize-window", "-A",
+            ]);
             let _ = cmd.status();
         } else {
             // Leave alternate screen and disable raw mode

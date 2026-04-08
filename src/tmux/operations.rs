@@ -217,3 +217,151 @@ impl TmuxOperations for RealTmuxOps {
         Ok(())
     }
 }
+
+/// Tmux ops using the user's current tmux session (no dedicated server).
+/// All commands omit `-L agtx` and target the default tmux server.
+pub struct CurrentSessionTmuxOps;
+
+impl TmuxOperations for CurrentSessionTmuxOps {
+    fn create_window(
+        &self,
+        session: &str,
+        window_name: &str,
+        working_dir: &str,
+        command: Option<String>,
+    ) -> Result<()> {
+        let mut cmd = std::process::Command::new("tmux");
+        let target = format!("{}:", session);
+        cmd.args(["new-window", "-d", "-t", &target, "-n", window_name])
+            .args(["-c", working_dir]);
+
+        if let Some(ref shell_cmd) = command {
+            let wrapped = format!("{}; exec $SHELL", shell_cmd);
+            cmd.args(["sh", "-c", &wrapped]);
+        }
+
+        let output = cmd.output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut details = String::new();
+            if !stderr.trim().is_empty() {
+                details.push_str(stderr.trim());
+            }
+            if !stdout.trim().is_empty() {
+                if !details.is_empty() {
+                    details.push_str(" | ");
+                }
+                details.push_str(stdout.trim());
+            }
+            if details.is_empty() {
+                anyhow::bail!("Failed to create tmux window");
+            } else {
+                anyhow::bail!("Failed to create tmux window: {}", details);
+            }
+        }
+        Ok(())
+    }
+
+    fn kill_window(&self, target: &str) -> Result<()> {
+        std::process::Command::new("tmux")
+            .args(["kill-window", "-t", target])
+            .output()?;
+        Ok(())
+    }
+
+    fn window_exists(&self, target: &str) -> Result<bool> {
+        let output = std::process::Command::new("tmux")
+            .args(["list-windows", "-t", target])
+            .output()?;
+        Ok(output.status.success())
+    }
+
+    fn send_keys(&self, target: &str, keys: &str) -> Result<()> {
+        std::process::Command::new("tmux")
+            .args(["send-keys", "-t", target, keys])
+            .output()?;
+        std::process::Command::new("tmux")
+            .args(["send-keys", "-t", target, "Enter"])
+            .output()?;
+        Ok(())
+    }
+
+    fn send_keys_literal(&self, target: &str, keys: &str) -> Result<()> {
+        std::process::Command::new("tmux")
+            .args(["send-keys", "-t", target, keys])
+            .output()?;
+        Ok(())
+    }
+
+    fn capture_pane(&self, target: &str) -> Result<String> {
+        let output = std::process::Command::new("tmux")
+            .args(["capture-pane", "-t", target, "-p"])
+            .output()?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn capture_pane_with_history(&self, target: &str, history_lines: i32) -> Vec<u8> {
+        std::process::Command::new("tmux")
+            .args(["capture-pane", "-t", target, "-p", "-e", "-J"])
+            .args(["-S", &format!("-{}", history_lines)])
+            .output()
+            .map(|o| o.stdout)
+            .unwrap_or_default()
+    }
+
+    fn get_cursor_info(&self, target: &str) -> Option<(usize, usize)> {
+        let output = std::process::Command::new("tmux")
+            .args(["display", "-p", "-t", target, "#{cursor_y} #{pane_height}"])
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            let parts: Vec<&str> = output_str.trim().split_whitespace().collect();
+            if parts.len() == 2 {
+                let cursor_y: usize = parts[0].parse().ok()?;
+                let pane_height: usize = parts[1].parse().ok()?;
+                return Some((cursor_y, pane_height));
+            }
+        }
+        None
+    }
+
+    fn resize_window(&self, target: &str, width: u16, height: u16) -> Result<()> {
+        std::process::Command::new("tmux")
+            .args(["resize-window", "-t", target])
+            .args(["-x", &width.to_string()])
+            .args(["-y", &height.to_string()])
+            .output()?;
+        Ok(())
+    }
+
+    fn pane_current_command(&self, target: &str) -> Option<String> {
+        let output = std::process::Command::new("tmux")
+            .args(["display", "-p", "-t", target, "#{pane_current_command}"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !cmd.is_empty() {
+                Some(cmd)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn has_session(&self, _session: &str) -> bool {
+        // In current mode, we always use the existing session
+        true
+    }
+
+    fn create_session(&self, _session: &str, _working_dir: &str) -> Result<()> {
+        // In current mode, the session already exists — nothing to create
+        Ok(())
+    }
+}

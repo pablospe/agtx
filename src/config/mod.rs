@@ -1,6 +1,27 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// Tmux mode: how agtx manages tmux windows for agent tasks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TmuxMode {
+    /// Dedicated tmux server (`tmux -L agtx`) — default, isolated from user sessions
+    #[default]
+    Server,
+    /// Use the user's current tmux session — windows appear alongside user's own windows
+    Current,
+}
+
+impl fmt::Display for TmuxMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmuxMode::Server => write!(f, "server"),
+            TmuxMode::Current => write!(f, "current"),
+        }
+    }
+}
 
 /// Global configuration (stored in ~/.config/agtx/)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +45,10 @@ pub struct GlobalConfig {
     /// Whether to automatically fullscreen-attach to the tmux session when opening a task popup
     #[serde(default)]
     pub fullscreen_on_enter: bool,
+
+    /// Tmux mode: "server" (dedicated agtx server) or "current" (user's current session)
+    #[serde(default)]
+    pub tmux_mode: TmuxMode,
 }
 
 impl Default for GlobalConfig {
@@ -34,6 +59,7 @@ impl Default for GlobalConfig {
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
             fullscreen_on_enter: false,
+            tmux_mode: TmuxMode::default(),
         }
     }
 }
@@ -337,6 +363,7 @@ pub struct MergedConfig {
     pub cleanup_script: Option<String>,
     pub workflow_plugin: Option<String>,
     pub fullscreen_on_enter: bool,
+    pub tmux_mode: TmuxMode,
 }
 
 impl MergedConfig {
@@ -367,6 +394,7 @@ impl MergedConfig {
             cleanup_script: project.cleanup_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
             fullscreen_on_enter: global.fullscreen_on_enter,
+            tmux_mode: global.tmux_mode.clone(),
         }
     }
 

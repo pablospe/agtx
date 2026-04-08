@@ -5615,10 +5615,10 @@ impl App {
 
     /// Suspend the TUI and attach directly to a tmux window for full interaction.
     /// Restores the TUI when the user detaches (Ctrl+b d).
-    fn attach_to_tmux_fullscreen(&mut self, window_name: &str) -> Result<()> {
+    /// Suspend the TUI and switch to a tmux task window.
+    /// `target` is the full tmux target stored in `task.session_name` (e.g. "session:window").
+    fn attach_to_tmux_fullscreen(&mut self, target: &str) -> Result<()> {
         let session = &self.state.tmux_project_name;
-        let window_target = format!("{}:{}", session, window_name);
-
         let is_current_mode = self.state.config.tmux_mode == TmuxMode::Current;
 
         // In "current" mode we're already in the same tmux server/session,
@@ -5635,7 +5635,7 @@ impl App {
                 cmd.args(["-L", tmux::AGENT_SERVER]);
             }
             cmd.args([
-                "select-window", "-t", &window_target,
+                "select-window", "-t", target,
                 ";", "resize-window", "-A",
             ]);
             let _ = cmd.status();
@@ -5656,7 +5656,7 @@ impl App {
                 .args([
                     "-L", tmux::AGENT_SERVER,
                     "attach", "-t", session,
-                    ";", "select-window", "-t", window_name,
+                    ";", "select-window", "-t", target,
                     ";", "resize-window", "-A",
                 ])
                 .env_remove("TMUX")
@@ -6310,11 +6310,17 @@ fn check_orchestrator_idle(
 }
 
 /// Detect the current tmux session name (for "current" tmux mode).
+/// Uses $TMUX_PANE to explicitly target the right pane, avoiding ambiguity.
 fn detect_current_tmux_session() -> Option<String> {
-    let output = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "#{session_name}"])
-        .output()
-        .ok()?;
+    // Use the pane ID from env to reliably identify our session
+    let pane = std::env::var("TMUX_PANE").ok();
+    let mut cmd = std::process::Command::new("tmux");
+    cmd.args(["display-message", "-p"]);
+    if let Some(ref pane_id) = pane {
+        cmd.args(["-t", pane_id]);
+    }
+    cmd.arg("#{session_name}");
+    let output = cmd.output().ok()?;
     if output.status.success() {
         let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !name.is_empty() {

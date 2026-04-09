@@ -15,13 +15,13 @@ use std::sync::{
 use std::time::Instant;
 
 use crate::agent::{self, AgentOperations};
-use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig, WorkflowPlugin};
+use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig, TmuxMode, WorkflowPlugin};
 use crate::db::{Database, PhaseStatus, Task, TaskStatus, TransitionRequest};
 use crate::git::{
     self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps,
 };
 use crate::skills;
-use crate::tmux::{self, RealTmuxOps, TmuxOperations};
+use crate::tmux::{self, CurrentSessionTmuxOps, RealTmuxOps, TmuxOperations};
 use crate::AppMode;
 
 use super::board::BoardState;
@@ -502,10 +502,23 @@ pub struct App {
 
 impl App {
     pub fn new(mode: AppMode, flags: crate::FeatureFlags) -> Result<Self> {
+        let global_config = GlobalConfig::load().unwrap_or_default();
+        let tmux_ops: Arc<dyn TmuxOperations> = match global_config.tmux_mode {
+            TmuxMode::Current => {
+                if std::env::var("TMUX").is_err() {
+                    anyhow::bail!(
+                        "tmux_mode = \"current\" requires running inside a tmux session.\n\
+                         Either start agtx inside tmux, or set tmux_mode = \"server\" in config."
+                    );
+                }
+                Arc::new(CurrentSessionTmuxOps)
+            }
+            TmuxMode::Server => Arc::new(RealTmuxOps),
+        };
         Self::with_ops(
             mode,
             flags,
-            Arc::new(RealTmuxOps),
+            tmux_ops,
             Arc::new(RealGitOps),
             Arc::new(RealGitHubOps),
             Arc::new(agent::RealAgentRegistry::new("claude")),
@@ -566,6 +579,13 @@ impl App {
         };
 
         let config = MergedConfig::merge(&global_config, &project_config);
+
+        // In "current" mode, override tmux_project_name with the actual current session
+        let tmux_project_name = if config.tmux_mode == TmuxMode::Current {
+            detect_current_tmux_session().unwrap_or(tmux_project_name)
+        } else {
+            tmux_project_name
+        };
 
         let mut app = Self {
             terminal,
@@ -5586,26 +5606,30 @@ impl App {
 
     /// Suspend the TUI and attach directly to a tmux window for full interaction.
     /// Restores the TUI when the user detaches (Ctrl+b d).
-    fn attach_to_tmux_fullscreen(&mut self, window_name: &str) -> Result<()> {
+    /// Suspend the TUI and switch to a tmux task window.
+    /// `target` is the full tmux target stored in `task.session_name` (e.g. "session:window").
+    fn attach_to_tmux_fullscreen(&mut self, target: &str) -> Result<()> {
         let session = &self.state.tmux_project_name;
-        let window_target = format!("{}:{}", session, window_name);
+        let is_current_mode = self.state.config.tmux_mode == TmuxMode::Current;
 
-        // Check if we're already inside the agtx tmux server — if so, just
-        // switch windows instead of nesting with attach.
-        let inside_agtx = std::env::var("TMUX")
-            .map(|v| v.contains(tmux::AGENT_SERVER))
-            .unwrap_or(false);
+        // In "current" mode we're already in the same tmux server/session,
+        // so just switch windows. Same for when we're already inside the
+        // agtx tmux server in "server" mode.
+        let inside_agtx = !is_current_mode
+            && std::env::var("TMUX")
+                .map(|v| v.contains(tmux::AGENT_SERVER))
+                .unwrap_or(false);
 
-        if inside_agtx {
-            // Already inside agtx tmux — just switch to the task window.
-            // Use session:window target to work across multiple project sessions.
-            let _ = std::process::Command::new("tmux")
-                .args([
-                    "-L", tmux::AGENT_SERVER,
-                    "select-window", "-t", &window_target,
-                    ";", "resize-window", "-A",
-                ])
-                .status();
+        if is_current_mode || inside_agtx {
+            let mut cmd = std::process::Command::new("tmux");
+            if !is_current_mode {
+                cmd.args(["-L", tmux::AGENT_SERVER]);
+            }
+            cmd.args([
+                "select-window", "-t", target,
+                ";", "resize-window", "-A",
+            ]);
+            let _ = cmd.status();
         } else {
             // Leave alternate screen and disable raw mode
             match self.terminal.backend_mut() {
@@ -5623,7 +5647,7 @@ impl App {
                 .args([
                     "-L", tmux::AGENT_SERVER,
                     "attach", "-t", session,
-                    ";", "select-window", "-t", window_name,
+                    ";", "select-window", "-t", target,
                     ";", "resize-window", "-A",
                 ])
                 .env_remove("TMUX")
@@ -6166,7 +6190,9 @@ impl App {
 
         // Update current project
         self.state.project_name = project.name.clone();
-        self.state.tmux_project_name = tmux::safe_session_name(&project.name);
+        if self.state.config.tmux_mode != TmuxMode::Current {
+            self.state.tmux_project_name = tmux::safe_session_name(&project.name);
+        }
         self.state.project_path = Some(project_path.clone());
 
         // Open project database (create if needed)
@@ -6267,6 +6293,27 @@ fn check_orchestrator_idle(
             _ => OrchestratorIdleResult::Waiting,
         }
     }
+}
+
+/// Detect the current tmux session name (for "current" tmux mode).
+/// Uses $TMUX_PANE to explicitly target the right pane, avoiding ambiguity.
+fn detect_current_tmux_session() -> Option<String> {
+    // Use the pane ID from env to reliably identify our session
+    let pane = std::env::var("TMUX_PANE").ok();
+    let mut cmd = std::process::Command::new("tmux");
+    cmd.args(["display-message", "-p"]);
+    if let Some(ref pane_id) = pane {
+        cmd.args(["-t", pane_id]);
+    }
+    cmd.arg("#{session_name}");
+    let output = cmd.output().ok()?;
+    if output.status.success() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
 }
 
 fn ensure_project_tmux_session(

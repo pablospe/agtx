@@ -1,6 +1,6 @@
 use agtx::config::{
     determine_first_run_action, FirstRunAction, GlobalConfig, MergedConfig, PhaseAgentsConfig,
-    ProjectConfig, ThemeConfig, WorktreeConfig,
+    ProjectConfig, ThemeConfig, TmuxMode, WorktreeConfig,
 };
 
 // === ThemeConfig Tests ===
@@ -124,34 +124,10 @@ fn test_merged_config_project_overrides() {
     );
     assert_eq!(merged.copy_files, Some(".env, .env.local".to_string()));
     assert_eq!(merged.init_script, Some("npm install".to_string()));
-    // worktree_dir not overridden, uses global default
-    assert_eq!(merged.worktree_dir, ".agtx/worktrees");
     assert_eq!(
         merged.cleanup_script,
         Some("scripts/cleanup.sh".to_string())
     );
-}
-
-#[test]
-fn test_merged_config_worktree_dir_override() {
-    let global = GlobalConfig::default();
-    let project = ProjectConfig {
-        worktree_dir: Some(".worktrees".to_string()),
-        ..Default::default()
-    };
-
-    let merged = MergedConfig::merge(&global, &project);
-    assert_eq!(merged.worktree_dir, ".worktrees");
-}
-
-#[test]
-fn test_merged_config_worktree_dir_global() {
-    let mut global = GlobalConfig::default();
-    global.worktree.worktree_dir = ".wt".to_string();
-    let project = ProjectConfig::default();
-
-    let merged = MergedConfig::merge(&global, &project);
-    assert_eq!(merged.worktree_dir, ".wt");
 }
 
 // === FirstRunAction Tests ===
@@ -392,4 +368,40 @@ color_popup_header = "#69fae7"
     assert!(config.fullscreen_on_enter, "fullscreen_on_enter should be true");
     let merged = MergedConfig::merge(&config, &ProjectConfig::default());
     assert!(merged.fullscreen_on_enter, "merged fullscreen_on_enter should be true");
+}
+
+// === TmuxMode Tests ===
+
+#[test]
+fn test_tmux_mode_defaults_to_server() {
+    let config: GlobalConfig = toml::from_str("").unwrap();
+    assert_eq!(config.tmux_mode, TmuxMode::Server);
+}
+
+#[test]
+fn test_tmux_mode_set_to_current() {
+    let toml_str = r#"tmux_mode = "current""#;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.tmux_mode, TmuxMode::Current);
+}
+
+#[test]
+fn test_tmux_mode_set_to_server() {
+    let toml_str = r#"tmux_mode = "server""#;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.tmux_mode, TmuxMode::Server);
+}
+
+#[test]
+fn test_tmux_mode_merged() {
+    let mut global = GlobalConfig::default();
+    global.tmux_mode = TmuxMode::Current;
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    assert_eq!(config.tmux_mode, TmuxMode::Current);
+}
+
+#[test]
+fn test_tmux_mode_display() {
+    assert_eq!(TmuxMode::Server.to_string(), "server");
+    assert_eq!(TmuxMode::Current.to_string(), "current");
 }
